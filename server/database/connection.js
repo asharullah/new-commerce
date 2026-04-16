@@ -10,10 +10,10 @@ const useLocalhost = process.env.USE_LOCALHOST === 'true';
 if (useLocalhost) {
     console.log("Inside local")
     connectionParams = {
-        user: "root",
-        host: "localhost",
-        password: "",
-        database: "e_commerce",
+        user: process.env.DB_SERVER_USER,
+        host: process.env.DB_SERVER_HOST,
+        password: process.env.DB_SERVER_PASSWORD,
+        database: process.env.DB_SERVER_DATABASE,
     };
 } else {
     connectionParams = {

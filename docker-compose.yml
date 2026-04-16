@@ -1,0 +1,49 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: ecommerce-mysql
+    restart: unless-stopped
+    env_file:
+      - ./database/.env
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/createTables.sql:/docker-entrypoint-initdb.d/createTables.sql
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uappuser", "-papppass"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 5s
+
+  backend:
+    build: ./server
+    container_name: ecommerce-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file:
+      - ./server/.env
+    networks:
+      - ecommerce-network
+
+  frontend:
+    build: ./client
+    container_name: ecommerce-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - ecommerce-network
+
+volumes:
+  mysql_data:
+
+networks:
+  ecommerce-network:
