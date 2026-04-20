@@ -6,6 +6,9 @@ on:
       - main
 
 jobs:
+  # ─────────────────────────────
+  # JOB 1: Test
+  # ─────────────────────────────
   test:
     runs-on: ubuntu-latest
     steps:
@@ -16,25 +19,35 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: 18
+        cache: 'npm'
+        cache-dependency-path: |
+          server/package-lock.json
+          client/package-lock.json
 
     - name: Test Backend
       run: |
         cd server
-        npm install
+        npm ci
         npm test --passWithNoTests || true
 
     - name: Test Frontend
       run: |
         cd client
-        npm install
+        npm ci
         CI=true npm test --passWithNoTests --watchAll=false || true
 
+  # ─────────────────────────────
+  # JOB 2: Build & Push
+  # ─────────────────────────────
   build:
     runs-on: ubuntu-latest
     needs: test
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -43,24 +56,58 @@ jobs:
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Build & Push Backend
-      run: |
-        docker build -t ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:${{ github.sha }} ./server
-        docker tag ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:latest
-        docker push ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:${{ github.sha }}
-        docker push ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:latest
+      uses: docker/build-push-action@v5
+      with:
+        context: ./server
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:${{ github.sha }}
+          ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:latest
+        cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:cache
+        cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:cache,mode=max
 
     - name: Build & Push Frontend
-      run: |
-        docker build \
-          --build-arg REACT_APP_API_URL=/ \
-          -t ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:${{ github.sha }} ./client
-        docker tag ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:latest
-        docker push ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:${{ github.sha }}
-        docker push ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:latest
+      uses: docker/build-push-action@v5
+      with:
+        context: ./client
+        push: true
+        build-args: |
+          REACT_APP_API_URL=/
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:${{ github.sha }}
+          ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:latest
+        cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:cache
+        cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:cache,mode=max
 
-  deploy:
+  # ─────────────────────────────
+  # JOB 3: Security Scan
+  # ─────────────────────────────
+  security:
     runs-on: ubuntu-latest
     needs: build
+    steps:
+    - name: Scan Backend Image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ secrets.DOCKER_USERNAME }}/e-commerce-backend:${{ github.sha }}
+        format: table
+        exit-code: 1
+        severity: CRITICAL
+
+    - name: Scan Frontend Image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ secrets.DOCKER_USERNAME }}/e-commerce-frontend:${{ github.sha }}
+        format: table
+        exit-code: 1
+        severity: CRITICAL
+
+  # ─────────────────────────────
+  # JOB 4: Deploy
+  # ─────────────────────────────
+  deploy:
+    runs-on: ubuntu-latest
+    needs: security
     steps:
     - name: Deploy to EC2
       uses: appleboy/ssh-action@v1.0.3
@@ -72,6 +119,10 @@ jobs:
         script: |
           cd new-commerce
 
+          # Save current tag for rollback
+          echo "IMAGE_TAG=${{ github.sha }}" > .deploy.env
+
+          # Create env files
           cat > database/.env << EOF
           MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
           MYSQL_DATABASE=${{ secrets.MYSQL_DATABASE }}
@@ -90,11 +141,14 @@ jobs:
           JWT_SECRET_KEY_REFRESH_TOKEN=${{ secrets.JWT_SECRET_KEY_REFRESH_TOKEN }}
           EOF
 
+          # Deploy without downtime
+          export IMAGE_TAG=${{ github.sha }}
+          export DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}
           docker compose pull
-          docker compose down --remove-orphans
-          docker compose up -d
+          docker compose up -d --remove-orphans
           docker image prune -af
 
+          # Health check
           echo "Waiting for containers..."
           for i in $(seq 1 18); do
             RUNNING=$(docker compose ps --status running --quiet | wc -l)
@@ -105,8 +159,19 @@ jobs:
 
           docker compose ps
 
+          # Rollback if failed
           RUNNING=$(docker compose ps --status running --quiet | wc -l)
           if [ "$RUNNING" -lt 3 ]; then
-            echo "ERROR: Not all containers are running!"
+            echo "Deploy failed! Rolling back..."
+            PREV_TAG=$(cat .deploy.env.bak 2>/dev/null | grep IMAGE_TAG | cut -d= -f2)
+            if [ ! -z "$PREV_TAG" ]; then
+              export IMAGE_TAG=$PREV_TAG
+              docker compose up -d --remove-orphans
+              echo "Rolled back to $PREV_TAG"
+            fi
             exit 1
           fi
+
+          # Save current as backup for next rollback
+          cp .deploy.env .deploy.env.bak
+          echo "Deploy successful!"

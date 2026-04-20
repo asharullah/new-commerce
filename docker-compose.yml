@@ -18,7 +18,7 @@ services:
       timeout: 5s
 
   backend:
-    image: asharullah/e-commerce-backend:latest
+    image: ${DOCKER_USERNAME:-asharullah}/e-commerce-backend:${IMAGE_TAG:-latest}
     container_name: ecommerce-backend
     restart: unless-stopped
     ports:
@@ -32,7 +32,7 @@ services:
       - ecommerce-network
 
   frontend:
-    image: asharullah/e-commerce-frontend:latest
+    image:  ${DOCKER_USERNAME:-asharullah}/e-commerce-frontend:${IMAGE_TAG:-latest}
     container_name: ecommerce-frontend
     restart: unless-stopped
     ports:
