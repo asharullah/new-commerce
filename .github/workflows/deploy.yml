@@ -33,7 +33,7 @@ jobs:
     - name: Test Frontend
       run: |
         cd client
-        npm ci
+        npm install
         CI=true npm test --passWithNoTests --watchAll=false || true
 
   # ─────────────────────────────
